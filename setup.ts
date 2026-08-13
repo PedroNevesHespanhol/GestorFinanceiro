@@ -76,7 +76,7 @@ async function main() {
   console.log('\n── Pluggy ──');
   const pluggyClientId = await ask('Pluggy Client ID: ');
   const pluggyClientSecret = await askSecret('Pluggy Client Secret: ');
-  const pluggyWebhookSecret = await askSecret('Pluggy Webhook Secret (valida assinatura HMAC dos webhooks; obrigatório em produção) [deixe vazio para pular]: ');
+  const pluggyWebhookSecret = await askSecret('Pluggy Webhook Secret (segredo que você define e registra na Pluggy como custom header X-Webhook-Secret; obrigatório em produção) [deixe vazio para pular]: ');
 
   // Google OAuth
   console.log('\n── Google OAuth ──');

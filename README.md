@@ -162,7 +162,7 @@ Frontend                        Backend                         Pluggy
 
 Os webhooks mantêm os dados atualizados automaticamente quando a Pluggy termina de sincronizar um item.
 
-**Endpoint:** `POST /webhook` — rota **pública** (sem autenticação), protegida por assinatura HMAC.
+**Endpoint:** `POST /webhook` — rota **pública** (sem autenticação Firebase), protegida por um header secreto.
 
 **Configuração:**
 
@@ -170,17 +170,26 @@ Os webhooks mantêm os dados atualizados automaticamente quando a Pluggy termina
    ```bash
    WEBHOOK_BASE_URL=https://seu-backend.com
    ```
-2. Defina o secret de validação (obtido no painel da Pluggy):
+2. Gere um segredo aleatório (você mesmo cria — ex.: `openssl rand -hex 32`) e coloque em:
    ```bash
-   PLUGGY_WEBHOOK_SECRET=seu_webhook_secret
+   PLUGGY_WEBHOOK_SECRET=seu_segredo_aleatorio
    ```
 3. O backend só registra a webhook URL na Pluggy se `WEBHOOK_BASE_URL` começar com `https://`. A URL final registrada é `WEBHOOK_BASE_URL/webhook`.
 
 > **Em desenvolvimento local (`http://localhost`) os webhooks NÃO são registrados.** Isso é intencional — a Pluggy não consegue chamar `localhost`. Nesse cenário, a sincronização acontece via `POST /pluggy/items` (logo após conectar) e pelo botão de **sync manual**. Para testar webhooks localmente, exponha o backend com um túnel (ex.: `ngrok http 3001`) e use a URL HTTPS gerada em `WEBHOOK_BASE_URL`.
 
-**Segurança da assinatura** (`backend/src/routes/webhook.ts`):
-- Cada requisição é validada com HMAC-SHA256 sobre o corpo bruto, comparando com o header `x-pluggy-signature`.
+**Autenticidade do webhook** (`backend/src/routes/webhook.ts`):
+- A Pluggy **não assina** os webhooks (não há HMAC/`x-pluggy-signature`). O mecanismo suportado é registrar um **custom header** na criação do webhook via API da Pluggy, que ela reenvia em toda chamada. O backend confere o header `X-Webhook-Secret` contra `PLUGGY_WEBHOOK_SECRET` (comparação em tempo constante).
+- Registre o header ao criar o webhook (via API da Pluggy):
+  ```json
+  {
+    "url": "https://seu-backend.com/webhook",
+    "event": "all",
+    "headers": { "X-Webhook-Secret": "seu_segredo_aleatorio" }
+  }
+  ```
 - Sem `PLUGGY_WEBHOOK_SECRET`: em **dev** a verificação é ignorada (com aviso no log); em **produção** (`NODE_ENV=production`) o webhook é **rejeitado** (falha fechada).
+- Reforço opcional: a Pluggy chama a partir do IP `52.67.145.81`, que você pode restringir por allowlist na infra.
 
 **Eventos tratados:**
 

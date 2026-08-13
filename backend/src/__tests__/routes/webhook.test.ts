@@ -193,3 +193,56 @@ describe('POST /webhook', () => {
     expect(mockSyncPluggyItem).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /webhook — validação do header secreto', () => {
+  let app: express.Application;
+  const originalSecret = process.env.PLUGGY_WEBHOOK_SECRET;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.PLUGGY_WEBHOOK_SECRET = 'super-secret';
+    app = express();
+    app.use(express.json());
+    app.use('/webhook', webhookRoutes);
+  });
+
+  afterEach(() => {
+    if (originalSecret === undefined) {
+      delete process.env.PLUGGY_WEBHOOK_SECRET;
+    } else {
+      process.env.PLUGGY_WEBHOOK_SECRET = originalSecret;
+    }
+  });
+
+  it('deve retornar 401 quando o header secreto está ausente', async () => {
+    const res = await request(app)
+      .post('/webhook')
+      .send({ event: 'item/updated', itemId: 'item-001' });
+
+    expect(res.status).toBe(401);
+    expect(res.body).toHaveProperty('error', 'Invalid webhook secret');
+    expect(mockFindUserIdByPluggyItemId).not.toHaveBeenCalled();
+  });
+
+  it('deve retornar 401 quando o header secreto está incorreto', async () => {
+    const res = await request(app)
+      .post('/webhook')
+      .set('x-webhook-secret', 'wrong-secret')
+      .send({ event: 'item/updated', itemId: 'item-001' });
+
+    expect(res.status).toBe(401);
+  });
+
+  it('deve aceitar (200) quando o header secreto confere', async () => {
+    mockFindUserIdByPluggyItemId.mockResolvedValue('user-001');
+    mockSyncPluggyItem.mockResolvedValue({ accountsSynced: 0, transactionsSynced: 0, errors: [] });
+
+    const res = await request(app)
+      .post('/webhook')
+      .set('x-webhook-secret', 'super-secret')
+      .send({ event: 'item/updated', itemId: 'item-001' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ received: true });
+  });
+});

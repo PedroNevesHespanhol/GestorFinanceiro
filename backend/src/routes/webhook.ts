@@ -20,45 +20,44 @@ interface PluggyWebhookPayload {
 }
 
 /**
- * Verifica assinatura HMAC-SHA256 enviada pela Pluggy no header x-pluggy-signature.
- * Sem PLUGGY_WEBHOOK_SECRET configurado: aceita em dev (com aviso), mas em
- * produção falha fechado — caso contrário qualquer payload forjado seria aceito.
+ * Header secreto usado para autenticar os webhooks da Pluggy.
+ * A Pluggy não assina os webhooks (não há HMAC/x-pluggy-signature na doc);
+ * o mecanismo suportado é registrar um custom header via API ao criar o webhook,
+ * que a Pluggy reenvia em toda chamada. Definimos aqui o mesmo header e valor.
  */
-function verifyPluggySignature(req: Request): boolean {
+const WEBHOOK_SECRET_HEADER = 'x-webhook-secret';
+
+/**
+ * Verifica o header secreto enviado pela Pluggy (registrado como custom header
+ * na criação do webhook via API). Sem PLUGGY_WEBHOOK_SECRET configurado: aceita
+ * em dev (com aviso), mas em produção falha fechado — caso contrário qualquer
+ * payload forjado seria aceito.
+ */
+function verifyWebhookSecret(req: Request): boolean {
   const secret = process.env.PLUGGY_WEBHOOK_SECRET;
   if (!secret) {
     if (process.env.NODE_ENV === 'production') {
       console.error('[Webhook] PLUGGY_WEBHOOK_SECRET not set in production — rejecting webhook');
       return false;
     }
-    console.warn('[Webhook] PLUGGY_WEBHOOK_SECRET not set — skipping signature verification (dev only)');
+    console.warn('[Webhook] PLUGGY_WEBHOOK_SECRET not set — skipping secret verification (dev only)');
     return true;
   }
 
-  const signature = req.headers['x-pluggy-signature'] as string | undefined;
-  if (!signature) {
+  const received = req.headers[WEBHOOK_SECRET_HEADER] as string | undefined;
+  if (!received) {
     return false;
   }
 
-  // Usa o raw body exato (bytes originais capturados pelo `verify` do express.json
-  // em index.ts), em vez de reserializar req.body — reserializar pode não bater
-  // byte-a-byte com o que a Pluggy assinou e rejeitar webhooks legítimos.
-  const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
-  if (!rawBody) {
+  // Comparação em tempo constante para evitar timing attacks. Buffers de tamanhos
+  // diferentes fazem timingSafeEqual lançar, então tratamos como inválido.
+  const a = Buffer.from(received);
+  const b = Buffer.from(secret);
+  if (a.length !== b.length) {
     return false;
   }
-
-  const expected = crypto
-    .createHmac('sha256', secret)
-    .update(rawBody)
-    .digest('hex');
-
-  // Comparação em tempo constante para evitar timing attacks
   try {
-    return crypto.timingSafeEqual(
-      Buffer.from(signature, 'hex'),
-      Buffer.from(expected, 'hex'),
-    );
+    return crypto.timingSafeEqual(a, b);
   } catch {
     return false;
   }
@@ -76,9 +75,9 @@ router.post(
   '/',
   async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      // Validação de assinatura HMAC (protege contra payloads forjados)
-      if (!verifyPluggySignature(req)) {
-        res.status(401).json({ error: 'Invalid webhook signature' });
+      // Validação do header secreto (protege contra payloads forjados)
+      if (!verifyWebhookSecret(req)) {
+        res.status(401).json({ error: 'Invalid webhook secret' });
         return;
       }
 

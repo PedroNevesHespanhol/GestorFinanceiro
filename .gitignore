@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+
+# Environment variables (never commit secrets)
+.env
+.env.local
+.env.*.local
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Coverage
+coverage/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# TypeScript
+*.tsbuildinfo
+
+# Playwright / Firebase emulators
+e2e/test-results/
+playwright-report/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log

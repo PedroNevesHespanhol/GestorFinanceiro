@@ -1,0 +1,28 @@
+{
+  "name": "gestor-financeiro",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "setup": "ts-node setup.ts",
+    "init:firebase": "npm run init:firebase --workspace=backend",
+    "dev": "concurrently \"npm run dev --workspace=backend\" \"npm run dev --workspace=frontend\"",
+    "build": "npm run build --workspace=backend && npm run build --workspace=frontend",
+    "install:all": "npm install && npm install --workspace=backend && npm install --workspace=frontend",
+    "test": "npm test --workspace=backend",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts"
+  },
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "devDependencies": {
+    "@playwright/test": "^1.62.0",
+    "@types/inquirer": "^9.0.7",
+    "@types/node": "^20.11.5",
+    "concurrently": "^8.2.2",
+    "firebase-tools": "^15.24.0",
+    "inquirer": "^9.2.12",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}

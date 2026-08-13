@@ -1,0 +1,13 @@
+rules_version = '2';
+
+// Todo o acesso a dados de produção passa pelo backend via Firebase Admin SDK,
+// que ignora estas regras. Elas existem como defesa em profundidade: bloqueiam
+// qualquer tentativa de leitura/escrita direta do client SDK (frontend) ao
+// Firestore, caso venha a ser usado por engano ou mal configurado.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

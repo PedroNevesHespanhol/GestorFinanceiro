@@ -647,6 +647,216 @@ describe('GET /planning/annual', () => {
     expect(months[3].receitasRecorrentes).toBe(0);
   });
 
+  it('lança compra no crédito (conta CREDIT) para o mês seguinte — cobrada na fatura da frente', async () => {
+    mockQueries({
+      windowTxs: [
+        makeTxDoc({
+          id: 'tx-credito',
+          accountId: 'acc-credito',
+          description: 'Restaurante',
+          amount: -300,
+          date: toTimestamp(new Date('2026-07-20T12:00:00')),
+          category: 'Alimentação',
+        }),
+      ],
+      accounts: [makeAccountDoc({ id: 'acc-credito', type: 'CREDIT' })],
+    });
+
+    const res = await request(app)
+      .get('/planning/annual')
+      .set('Authorization', 'Bearer valid-token');
+
+    const months = res.body.months;
+    // Compra em Julho no cartão de crédito → cobrada em Agosto (idx1), não em Julho.
+    expect(months[0].despesasVariaveis).toBe(0);
+    expect(months[1].despesasVariaveis).toBe(300);
+
+    const row = res.body.expenseRows.find((r: { id: string }) => r.id === 'oneoff-tx-credito');
+    expect(row.monthlyCells[0]).toBeNull();
+    expect(row.monthlyCells[1]).toMatchObject({ amount: 300, isProjected: false });
+  });
+
+  it('mantém compra no débito/PIX (conta BANK) no próprio mês', async () => {
+    mockQueries({
+      windowTxs: [
+        makeTxDoc({
+          id: 'tx-debito',
+          accountId: 'acc-banco',
+          amount: -150,
+          date: toTimestamp(new Date('2026-07-20T12:00:00')),
+        }),
+      ],
+      accounts: [makeAccountDoc({ id: 'acc-banco', type: 'BANK' })],
+    });
+
+    const res = await request(app)
+      .get('/planning/annual')
+      .set('Authorization', 'Bearer valid-token');
+
+    const months = res.body.months;
+    expect(months[0].despesasVariaveis).toBe(150);
+    expect(months[1].despesasVariaveis).toBe(0);
+  });
+
+  it('traz compra no crédito do mês anterior (lookback) para a fatura do mês atual', async () => {
+    mockQueries({
+      lookbackTxs: [
+        makeTxDoc({
+          id: 'tx-credito-junho',
+          accountId: 'acc-credito',
+          amount: -400,
+          date: toTimestamp(new Date('2026-06-25T12:00:00')),
+        }),
+      ],
+      accounts: [makeAccountDoc({ id: 'acc-credito', type: 'CREDIT' })],
+    });
+
+    const res = await request(app)
+      .get('/planning/annual')
+      .set('Authorization', 'Bearer valid-token');
+
+    const months = res.body.months;
+    // Compra em Junho no crédito → cobrada em Julho (mês atual, idx0).
+    expect(months[0].despesasVariaveis).toBe(400);
+  });
+
+  it('inclui a despesa de crédito deslocada no saldo do mês seguinte', async () => {
+    mockQueries({
+      windowTxs: [
+        makeTxDoc({
+          id: 'tx-credito-saldo',
+          accountId: 'acc-credito',
+          amount: -500,
+          date: toTimestamp(new Date('2026-07-20T12:00:00')),
+        }),
+      ],
+      accounts: [makeAccountDoc({ id: 'acc-credito', type: 'CREDIT' })],
+      recurringIncome: [
+        makeRecurringIncomeDoc({ amount: 3000, frequency: 'MONTHLY', createdAt: toTimestamp(new Date('2026-01-01T12:00:00')) }),
+      ],
+    });
+
+    const res = await request(app)
+      .get('/planning/annual')
+      .set('Authorization', 'Bearer valid-token');
+
+    const months = res.body.months;
+    // Agosto (idx1, futuro): 3000 (receita recorrente) - 500 (crédito de Julho) = 2500.
+    expect(months[1].saldo).toBe(2500);
+  });
+
+  it('suprime a projeção da despesa fixa no mês da fatura quando ela é paga no crédito (não duplica no saldo)', async () => {
+    mockQueries({
+      windowTxs: [
+        makeTxDoc({
+          id: 'tx-netflix',
+          accountId: 'acc-credito',
+          description: 'NETFLIX.COM',
+          amount: -44.9,
+          date: toTimestamp(new Date('2026-07-18T12:00:00')),
+        }),
+      ],
+      accounts: [makeAccountDoc({ id: 'acc-credito', type: 'CREDIT' })],
+      fixedExpenses: [
+        makeFixedExpenseDoc({
+          id: 'exp-netflix',
+          name: 'Netflix',
+          amount: 44.9,
+          category: 'Assinaturas',
+          createdAt: toTimestamp(new Date('2026-01-01T12:00:00')),
+        }),
+      ],
+      recurringIncome: [
+        makeRecurringIncomeDoc({ amount: 3000, frequency: 'MONTHLY', createdAt: toTimestamp(new Date('2026-01-01T12:00:00')) }),
+      ],
+    });
+
+    const res = await request(app)
+      .get('/planning/annual')
+      .set('Authorization', 'Bearer valid-token');
+
+    const months = res.body.months;
+
+    // Agosto (idx1, mês da fatura): a compra real no crédito entra como variável…
+    expect(months[1].despesasVariaveis).toBeCloseTo(44.9);
+    // …e a projeção da fixa Netflix é suprimida nesse mês (não soma de novo).
+    expect(months[1].despesasFixas).toBe(0);
+    // saldo de Agosto = 3000 - 44.90 (contado uma única vez).
+    expect(months[1].saldo).toBeCloseTo(2955.1);
+
+    // Setembro (idx2): sem compra real → a fixa volta a ser projetada normalmente.
+    expect(months[2].despesasFixas).toBeCloseTo(44.9);
+    expect(months[2].saldo).toBeCloseTo(2955.1);
+
+    // A linha FIXED da Netflix não tem célula em Agosto, mas tem em Setembro.
+    const row = res.body.expenseRows.find((r: { id: string }) => r.id === 'fixed-exp-netflix');
+    expect(row.monthlyCells[1]).toBeNull();
+    expect(row.monthlyCells[2]).toMatchObject({ amount: 44.9 });
+  });
+
+  it('não suprime a fixa quando só o valor coincide, mas a descrição não bate (evita falso positivo)', async () => {
+    mockQueries({
+      windowTxs: [
+        makeTxDoc({
+          id: 'tx-outro',
+          accountId: 'acc-credito',
+          description: 'PADARIA DO ZE',
+          amount: -44.9,
+          date: toTimestamp(new Date('2026-07-18T12:00:00')),
+        }),
+      ],
+      accounts: [makeAccountDoc({ id: 'acc-credito', type: 'CREDIT' })],
+      fixedExpenses: [
+        makeFixedExpenseDoc({
+          id: 'exp-netflix',
+          name: 'Netflix',
+          amount: 44.9,
+          createdAt: toTimestamp(new Date('2026-01-01T12:00:00')),
+        }),
+      ],
+    });
+
+    const res = await request(app)
+      .get('/planning/annual')
+      .set('Authorization', 'Bearer valid-token');
+
+    const months = res.body.months;
+    // Compra sem relação com a Netflix: a fixa continua projetada em Agosto,
+    // além da variável real — pois só o valor coincide, não o nome.
+    expect(months[1].despesasVariaveis).toBeCloseTo(44.9);
+    expect(months[1].despesasFixas).toBeCloseTo(44.9);
+  });
+
+  it('não deduz despesas fixas no saldo do mês atual (evita duplicar com as variáveis reais), mas deduz nos meses futuros', async () => {
+    mockQueries({
+      windowTxs: [
+        makeTxDoc({ type: 'CREDIT', amount: 4000, date: toTimestamp(new Date('2026-07-01T12:00:00')) }),
+        makeTxDoc({ type: 'DEBIT', amount: -800, date: toTimestamp(new Date('2026-07-05T12:00:00')) }),
+      ],
+      fixedExpenses: [
+        makeFixedExpenseDoc({ amount: 200, frequency: 'MONTHLY', createdAt: toTimestamp(new Date('2026-01-01T12:00:00')) }),
+      ],
+      recurringIncome: [
+        makeRecurringIncomeDoc({ amount: 3000, frequency: 'MONTHLY', createdAt: toTimestamp(new Date('2026-01-01T12:00:00')) }),
+      ],
+    });
+
+    const res = await request(app)
+      .get('/planning/annual')
+      .set('Authorization', 'Bearer valid-token');
+
+    const months = res.body.months;
+
+    // A coluna de despesas fixas continua exibindo o valor no mês atual…
+    expect(months[0].despesasFixas).toBe(200);
+    // …mas o saldo NÃO a deduz (já está nas variáveis reais): 4000 - 800 = 3200.
+    expect(months[0].saldo).toBe(3200);
+
+    // Agosto (futuro): sem dado real, a fixa é projetada e deduzida normalmente:
+    // 3000 (receita recorrente) - 200 (fixa) = 2800.
+    expect(months[1].saldo).toBe(2800);
+  });
+
   it('deve calcular o saldo usando dados reais no mês atual e projeções nos meses futuros', async () => {
     mockQueries({
       windowTxs: [
@@ -667,9 +877,10 @@ describe('GET /planning/annual', () => {
 
     const months = res.body.months;
 
-    // Julho (mês atual): saldo = receitas reais - (despesasVariaveis + despesasFixas + parceladas)
-    // = 5000 - (1000 + 200 + 0) = 3800
-    expect(months[0].saldo).toBe(3800);
+    // Julho (mês atual): as despesas fixas NÃO entram no saldo — já estão
+    // refletidas nas variáveis reais da Pluggy. saldo = receitas reais -
+    // (despesasVariaveis + parceladas) = 5000 - (1000 + 0) = 4000
+    expect(months[0].saldo).toBe(4000);
 
     // Dezembro (futuro): saldo = receitasRecorrentes - (despesasFixas + parceladas)
     // = 3000 - 200 = 2800 (sem despesasVariaveis, que só existem no mês atual)

@@ -256,32 +256,53 @@ router.get(
       }
 
       // ── 4. Non-installment variable expenses ──────────────────────────────
-      for (const tx of windowTxs) {
+      //
+      // Credit-card purchases only land on the FOLLOWING month's invoice, so a
+      // credit purchase is billed one month after its transaction date. Bank
+      // purchases (PIX / débito) are charged immediately, in their own month.
+      // Iterating allTxs (window + lookback) lets a credit purchase made in the
+      // month just before the window still bill into the window's first month;
+      // a bank purchase from before the window bills outside it and is dropped
+      // naturally by the window-membership check below.
+      //
+      // realVariablesByMonth records, per visible month, the real one-off
+      // transactions that landed there — used in step 6 to suppress a fixed
+      // expense's projection when a real charge already covers it.
+      const realVariablesByMonth: { normDesc: string; amount: number }[][] =
+        Array.from({ length: 12 }, () => []);
+
+      for (const tx of allTxs) {
         if (tx.type !== 'DEBIT') continue;
         const { source } = extractInstallment(tx);
         if (source !== null) continue; // installments handled in step 5
 
         const txDate = tx.date.toDate();
-        const idx = monthIndex.get(monthKey(txDate.getFullYear(), txDate.getMonth() + 1));
-        if (idx === undefined) continue;
-        const plan = months[idx];
-        if (plan.isPast || plan.isCurrent) {
-          const amount = Math.abs(tx.amount);
-          plan.despesasVariaveis += amount;
+        const account = accountMap.get(tx.accountId);
+        const isCreditCard = account?.type === 'CREDIT';
+        const billing = isCreditCard
+          ? addMonths(txDate.getMonth() + 1, txDate.getFullYear(), 1)
+          : { month: txDate.getMonth() + 1, year: txDate.getFullYear() };
 
-          const monthlyCells: (MonthCell | null)[] = new Array(12).fill(null);
-          monthlyCells[idx] = { amount, isProjected: false };
-          expenseRows.push({
-            id: `oneoff-${tx.id}`,
-            description: stripInstallmentTokens(tx.description),
-            category: tx.userCategory ?? tx.category,
-            paymentMethod: resolvePaymentMethod(tx, accountMap, itemMap),
-            kind: 'ONE_OFF',
-            date: tx.date.toDate().toISOString(),
-            totalAmount: amount,
-            monthlyCells,
-          });
-        }
+        const idx = monthIndex.get(monthKey(billing.year, billing.month));
+        if (idx === undefined) continue;
+
+        const plan = months[idx];
+        const amount = Math.abs(tx.amount);
+        plan.despesasVariaveis += amount;
+        realVariablesByMonth[idx].push({ normDesc: normalizeDescription(tx.description), amount });
+
+        const monthlyCells: (MonthCell | null)[] = new Array(12).fill(null);
+        monthlyCells[idx] = { amount, isProjected: false };
+        expenseRows.push({
+          id: `oneoff-${tx.id}`,
+          description: stripInstallmentTokens(tx.description),
+          category: tx.userCategory ?? tx.category,
+          paymentMethod: resolvePaymentMethod(tx, accountMap, itemMap),
+          kind: 'ONE_OFF',
+          date: tx.date.toDate().toISOString(),
+          totalAmount: amount,
+          monthlyCells,
+        });
       }
 
       // ── 5. Installments — unified algorithm ───────────────────────────────
@@ -456,17 +477,47 @@ router.get(
 
       // ── 6. Fixed expenses + recurring income ──────────────────────────────
       for (const plan of months) {
-        for (const exp of fixedExpenses)   plan.despesasFixas        += recurrenceAmount(exp, plan.year, plan.month);
-        for (const inc of recurringIncomes) plan.receitasRecorrentes  += recurrenceAmount(inc, plan.year, plan.month);
+        for (const inc of recurringIncomes) plan.receitasRecorrentes += recurrenceAmount(inc, plan.year, plan.month);
       }
 
+      // A registered fixed expense (e.g. a streaming subscription) can also
+      // arrive as a real transaction — most notably a credit-card charge shifted
+      // into next month by step 4. When a FUTURE month already has a real
+      // transaction matching a fixed expense (same name + amount), the
+      // projection is suppressed for that month so the saldo isn't charged twice
+      // (real variável + projected fixa). Name matching guards against
+      // suppressing an unrelated purchase that merely shares the amount. The
+      // current/past month is left untouched here: its fixed expenses are shown
+      // for reference and already excluded from the saldo in step 7.
+      const fixedCoveredIn = (exp: FixedExpenseDoc, monthIdx: number): boolean => {
+        const expNorm = normalizeDescription(exp.name);
+        if (expNorm.length < 4) return false;
+        const tolerance = Math.max(0.5, exp.amount * 0.02);
+        return realVariablesByMonth[monthIdx].some((r) => {
+          if (Math.abs(r.amount - exp.amount) > tolerance) return false;
+          return (
+            sameMerchant(expNorm, r.normDesc) ||
+            r.normDesc.includes(expNorm) ||
+            expNorm.includes(r.normDesc)
+          );
+        });
+      };
+
       for (const exp of fixedExpenses) {
-        const monthlyCells: (MonthCell | null)[] = months.map((plan) => {
+        const monthlyCells: (MonthCell | null)[] = months.map((plan, idx) => {
           const amount = recurrenceAmount(exp, plan.year, plan.month);
-          return amount > 0 ? { amount, isProjected: false } : null;
+          if (amount <= 0) return null;
+          const isFuture = !(plan.isPast || plan.isCurrent);
+          if (isFuture && fixedCoveredIn(exp, idx)) return null; // real charge already covers it
+          return { amount, isProjected: false };
         });
         const firstCell = monthlyCells.find((c) => c !== null);
         if (!firstCell) continue;
+
+        months.forEach((plan, idx) => {
+          const cell = monthlyCells[idx];
+          if (cell) plan.despesasFixas += cell.amount;
+        });
 
         expenseRows.push({
           id: `fixed-${exp.id}`,
@@ -490,10 +541,21 @@ router.get(
 
       // ── 7. Saldo ──────────────────────────────────────────────────────────
       for (const plan of months) {
-        const income = plan.isPast || plan.isCurrent ? plan.receitas : plan.receitasRecorrentes;
+        const isReal = plan.isPast || plan.isCurrent;
+        const income = isReal ? plan.receitas : plan.receitasRecorrentes;
+        // despesasVariaveis is real, already-incurred spending and only ever
+        // lands in the current month (bank + credit billed from last month) or
+        // the next month (credit purchased this month, billed next), so it
+        // always counts toward the saldo — including the shifted credit rows.
+        //
+        // Once a month is the current/past month its real Pluggy transactions
+        // already include whatever was actually paid for the fixed expenses
+        // (rent, subscriptions…), so deducting despesasFixas on top would
+        // double-charge. Only future months — which have no real data — project
+        // the fixed expenses into the saldo.
         const spending =
-          (plan.isPast || plan.isCurrent ? plan.despesasVariaveis : 0) +
-          plan.despesasFixas +
+          plan.despesasVariaveis +
+          (isReal ? 0 : plan.despesasFixas) +
           plan.totalParceladas;
         plan.saldo = income - spending;
       }
